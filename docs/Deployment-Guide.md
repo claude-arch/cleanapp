@@ -6,6 +6,7 @@
 - **Vercel Account**: For hosting and deployment
 - **Supabase Account**: For database and authentication
 - **Stripe Account**: For payment processing
+
 - **Twilio Account**: For SMS notifications
 - **Google Cloud Account**: For Maps API
 - **GitHub Account**: For version control and CI/CD
