@@ -2,20 +2,17 @@ import { NextRequest, NextResponse } from 'next/server';
 import { createSupabaseServerClient } from '@/lib/supabase';
 import { bookingRequestSchema } from '@/lib/validations';
 import { calculateCommission, calculateProcessingFee } from '@/lib/stripe';
+import { withErrorHandling, errors, createApiResponse } from '@/lib/api-error-handler';
 
-export async function GET(request: NextRequest) {
-  try {
-    const supabase = createSupabaseServerClient();
-    
-    // Get user from session
-    const { data: { user }, error: authError } = await supabase.auth.getUser();
-    
-    if (authError || !user) {
-      return NextResponse.json(
-        { success: false, error: 'Unauthorized' },
-        { status: 401 }
-      );
-    }
+export const GET = withErrorHandling(async (request: NextRequest) => {
+  const supabase = createSupabaseServerClient();
+
+  // Get user from session
+  const { data: { user }, error: authError } = await supabase.auth.getUser();
+
+  if (authError || !user) {
+    throw errors.unauthorized();
+  }
 
     const { searchParams } = new URL(request.url);
     const page = parseInt(searchParams.get('page') || '1');
@@ -48,7 +45,7 @@ export async function GET(request: NextRequest) {
       query = query.eq('status', status);
     }
 
-    const { data: bookings, error } = await query;
+    const { data: bookings, error, count } = await query;
 
     if (error) {
       console.error('Error fetching bookings:', error);
@@ -58,6 +55,16 @@ export async function GET(request: NextRequest) {
       );
     }
 
+    // Get total count for pagination
+    const { count: totalCount, error: countError } = await supabase
+      .from('bookings')
+      .select('*', { count: 'exact', head: true })
+      .eq('customer_id', user.id);
+
+    if (countError) {
+      console.error('Error getting booking count:', countError);
+    }
+
     return NextResponse.json({
       success: true,
       data: bookings,
@@ -65,7 +72,10 @@ export async function GET(request: NextRequest) {
         pagination: {
           page,
           limit,
-          total: bookings?.length || 0,
+          total: totalCount || 0,
+          totalPages: Math.ceil((totalCount || 0) / limit),
+          hasNext: page * limit < (totalCount || 0),
+          hasPrev: page > 1,
         },
       },
     });
@@ -195,9 +205,45 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // TODO: Create payment intent with Stripe
-    // TODO: Send confirmation email
-    // TODO: Notify available providers
+    // Create payment intent with Stripe
+    try {
+      const { createPaymentIntent } = await import('@/lib/stripe');
+      const paymentIntent = await createPaymentIntent(
+        totalAmount,
+        user.id,
+        '', // Provider will be assigned later
+        booking.id,
+        bookingData.paymentMethodId
+      );
+
+      // Update booking with payment intent
+      await supabase
+        .from('bookings')
+        .update({
+          stripe_payment_intent_id: paymentIntent.id,
+          status: 'payment_pending'
+        })
+        .eq('id', booking.id);
+    } catch (paymentError) {
+      console.error('Payment intent creation failed:', paymentError);
+      // Don't fail the booking creation, just log the error
+    }
+
+    // Send confirmation email
+    try {
+      const { sendBookingConfirmationEmail } = await import('@/lib/email');
+      await sendBookingConfirmationEmail(user.id, booking.id);
+    } catch (emailError) {
+      console.error('Email sending failed:', emailError);
+    }
+
+    // Notify available providers
+    try {
+      const { notifyAvailableProviders } = await import('@/lib/notifications');
+      await notifyAvailableProviders(booking.id);
+    } catch (notificationError) {
+      console.error('Provider notification failed:', notificationError);
+    }
 
     return NextResponse.json({
       success: true,
